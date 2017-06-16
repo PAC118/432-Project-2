@@ -1,0 +1,833 @@
+---
+title: "Predicting Medical School Admissions"
+author: "Leo Villaroel and Trish Campos"
+date: '`r Sys.Date()`'
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    number_sections: yes
+    code_folding: show
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE, include=FALSE}
+library(knitr); library(rmdformats)
+
+## Global options
+opts_chunk$set(echo=TRUE, cache=FALSE, prompt=FALSE, tidy=FALSE, 
+               comment=NA, message=FALSE, warning=FALSE)
+opts_knit$set(width=75)
+
+## For this template to work, you'll need to install the `rmdformats` package in your R session, using the command
+# install.packages("rmdformats")
+```
+
+```{r load packages here, include = FALSE}
+library(arm); library(leaps); library(tableone); library(gridExtra);
+library(pander); library(ROCR); library(readxl); library(miceadds)
+library(rms); library(forcats); library(mice); library(mitools);
+library(VIM); library(broom); library(searchable); library(tidyverse)
+
+source("Love-boost.R")
+```
+
+# Background
+
+In 2016-2017, 53,042 people applied to medical school, while approximately 40% of those applicants matriculated. As the number of applicants continues to increase year after year, so too does the competitive nature of medical school admissions. While many factors play a role in medical school admissions, it remains relatively opaque how objective metrics such as undergraduate grade point average (GPA), graduate school performance, and MCAT performance, etc. weigh in to the medical school admission process.
+
+The typical medical school applicant will apply to around 15.6 schools, spending an average of $1900 in application fees alone [App Cost](https://students-residents.aamc.org/financial-aid/article/the-cost-of-applying-to-medical-school/). With only around 40% of applicants gaining admission to at least one medical school [MCAT/GPA Grid](https://www.aamc.org/download/321442/data/factstablea1.pdf), the admissions process is quite competitive. It would be great if potential applicants had a method for gauging the competitiveness of their application, prior to spending hundreds of dollars.
+
+Undergraduate GPA and MCAT score have been identified by admissions committees as the most important factors in the pre-interview process in a 2014 [Kaplan Survey](https://www.kaptest.com/blog/med-school-pulse/2014/11/19/2014-kaplan-survey-shows-latest-trends-medical-school-admissions ) of 78 medical schools.   
+
+
+# Research Questions
+
+1. Does the percentile on the Medical College Admission Test predict a successful applicant cycle?
+
+2. Does the average in the core physiology classes predict a successful applicant cycle?
+
+# The Data{.tabset}
+
+The data come from five classes of students in the medical physiology program, entering in the years 2011 - 2015. The complete, tidied dataset is a combination of applicant data from the Hobson applicant portal, semester grades collected on blackboard, an exit survey, and miscellaneous spreadsheets collected by interested advisors. Demographic data, undergraduate GPAs, and test scores were obtained through Hobson. The total physiology GPA was calculated from semester grades. Acceptance information was obtained through the exit survey as well as the advisor sheets. 
+
+A few drawbacks of this dataset include:
+
+  + Only a small subset of people completed the exit survey (~100/600).
+  + I suspect that the advisor sheets are not up to date.
+  + I have no way to quantify success at the interview stage.
+  + How many interviews did the student attend?
+  + I would have liked to know how many programs students applied to.
+  + I would have liked a count of hours spent shadowing/volunteering.
+  + Only the first MCAT score reported was used. (Some medical schools average scores, take the highest, or use the last score.)
+  + MCAT scores were reported on two scaling systems: 2015 (out of 528) [2015 Percentiles](https://aamc-orange.global.ssl.fastly.net/production/media/filer_public/dd/ae/ddaeef9d-6463-4bcd-82cc-4aebc8b9ce39/mcat_total_and_section_score_percentile_ranks-update_with_n.pdf) and before 2015 (out of 45) [Old Percentiles](https://aamc-orange.global.ssl.fastly.net/production/media/filer_public/5f/16/5f169a91-12b7-42e0-8749-a17f3bebe7a4/finalpercentileranksfortheoldmcatexam.pdf). Percentiles were calculated (`pnorm()`) based on the published standard deviations and means. Normal distributions were assumed, however I noticed some of the percentiles towards the extremes were off by about 2 points.
+  + There was a fair amount (~30%) of MCAT score data missing. (We address this issue through a complete case analysis.)
+  + Where is the 2015 outcome data?
+  + Combining and cleaning the datasets took a very long time as neither student IDs/numbers were used on the grade or advisor sheets.
+
+## Data Load
+
+```{r Load Data, include=TRUE, message=FALSE, warning=FALSE}
+# Survey Responses
+outcomes <- read_excel("Exit_Survey_Raw.xlsx", sheet = "Sheet_1") %>% 
+  filter(is.na(Last.name) != TRUE) #get rid of no names
+
+# Grades/NBME/Demographics Entering 2011 Class
+class2011_nbme <- read_excel("Grades 2011.xlsx", sheet = "Summary of Performance") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+
+# Grades/NBME/Demographics Entering 2012 Class
+class2012_dems <- read_excel("Grades 2012.xlsx", sheet = "Student Summary") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2012_nbme <- read_excel("Grades 2012.xlsx", sheet = "Summary of Performance") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+
+# Grades/NBME/Demographics Entering 2013 Class
+class2013_dems <- read_excel("Grades 2013.xlsx", sheet = "MS Roster") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2013_nbme <- read_excel("Grades 2013.xlsx", sheet = "Summary") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+
+# Grades/NBME/Demographics Entering 2014 Class
+class2014_dems <- read_excel("Grades 2014.xlsx", sheet = "Summary") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2014_nbme <- read_excel("Grades 2014.xlsx", sheet = "Sheet1") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2014_data <- read_excel("Grades 2014.xlsx", sheet = "More_Data_2014") %>%
+  select(app.ID, Race, Sex) 
+  #filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+
+# Grades/NBME/Demographics Entering 2015 Class
+class2015_dems <- read_excel("Grades 2015.xlsx", sheet = "Fall2015") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2015_nbme <- read_excel("Grades 2015.xlsx", sheet = "Summary1") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+
+# Grades/Demographics Entering 2016 Class
+class2016_dems <- read_excel("Grades 2016.xlsx", sheet = "Sheet2") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2016_dems2 <- read_excel("Google Grades 2016.xlsx", sheet = "Sheet1") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2016_phol481 <- read_excel("Google Grades 2016.xlsx", sheet = "Phol481") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+class2016_phol483 <- read_excel("Google Grades 2016.xlsx", sheet = "Phol483") %>% 
+  filter(is.na(Last.name) != TRUE) # Remove trailing empty rows
+```
+
+As orginally loaded, there are 11 tibbles from 11 separate sheets in 7 excel files. There was at least one tibble for each year of data.
+
+## Tidying, Data Cleaning and Data Management
+
+```{r Tidy the Data, include = TRUE}
+# Merge Demographic and NBME Tibbles for Each Class year
+# Link by Last and First names
+
+class2011 <- class2011_nbme %>% 
+  mutate(Year = 2011) # Keep track of the Entry Year
+
+class2012 <- full_join(class2012_dems, class2012_nbme, 
+                       by = c("Last.name", "First.name")) %>%
+  mutate(Year = 2012) # Keep track of the Entry Year
+
+class2013 <- full_join(class2013_dems, class2013_nbme, 
+                       by = c("Last.name", "First.name")) %>%
+  mutate(Year = 2013) # Keep track of the Entry Year
+
+class2014 <- full_join(class2014_dems, class2014_nbme, 
+                       by = c("Last.name", "First.name")) %>% 
+  filter(is.na(app.ID) != TRUE) # Remove people with inadequate info
+  
+class2014 <- full_join(class2014, class2014_data, 
+                       by = c("app.ID")) %>% 
+  mutate(Year = 2014) # Keep track of the Entry Year
+
+class2015 <- full_join(class2015_dems, class2015_nbme, 
+                       by = c("Last.name", "First.name")) %>% 
+  mutate(Year = 2015) # Keep track of the Entry Year
+
+class2016 <- full_join(class2016_dems, class2016_dems2, 
+                       by = c("Last.name", "First.name")) %>% 
+  full_join(class2016_phol481, by = c("Last.name", "First.name")) %>% 
+  full_join(class2016_phol483, by = c("Last.name", "First.name")) %>% 
+  mutate(Year = 2016) %>% # Keep track of the Entry Year
+  filter(is.na(app.ID) != TRUE) # Remove people with inadequate info
+
+# Bind all the Years' Data Together
+demographics <- bind_rows(class2011, class2012, class2013, 
+                          class2014, class2015, class2016)
+
+# Join the outcomes 
+dem.outcomes <- full_join(demographics, outcomes, 
+                          by = ignore.case(c("Last.name", "First.name")))
+
+```
+
+Combine the information for each year's data, linking by first and last names.
+
+```{r Create New Variables, include=T}
+dems <- dem.outcomes %>%
+  mutate(record.ID = seq(1, nrow(dem.outcomes)), # Number the people
+         # Fill in Values for NAs
+         Accepted = ifelse((is.na(Accepted) == TRUE), 0, Accepted),
+         Accepted.Survey = ifelse(is.na(Accepted.Survey) == T, 0, Accepted.Survey),
+         # Use the Survey MCAT Values to Update Original Score
+         MCAT.Survey.Last = ifelse(is.na(MCAT.Survey.Score2) == T, 
+                                   MCAT.Survey.Score1, MCAT.Survey.Score2),
+         MCAT.T = ifelse(is.na(MCAT.Survey.Last) == T, MCAT.T, MCAT.Survey.Last),
+         # Use the Survey to Update Accepted Schools
+         School.Acceptances = ifelse(is.na(School.Acceptances.Survey) == T,
+                                       School.Acceptances, School.Acceptances.Survey),
+         # Some of the values were on 4.00 scale
+         PHOL483 = ifelse(PHOL483 <= 4, (PHOL483 + 1)*20, PHOL483),
+         PHOL484 = ifelse(PHOL484 <= 4, (PHOL484 + 1)*20, PHOL484),
+         # Calculate Weighted 100 Pt Scale
+         Phys.GPA = ifelse(is.na(Phys.GPA) == TRUE, 
+                           (PHOL481*(6/16) + PHOL483*(6/16) +
+                             PHOL482*(2/16) + PHOL484*(2/16)),
+                           Phys.GPA),
+         # Convert 100 to 4.00 Scale
+         Grad.GPA = ifelse(is.na(Grad.GPA) == TRUE,
+                             Phys.GPA/20 - 1, Grad.GPA),
+         Ugrad.GPA = round(Ugrad.GPA, 2), 
+         # Calculate MCAT Percentiles based on AAMC Data/Normal Distribution
+         MCAT.Percentile = round(ifelse(MCAT.T > 470,
+                            pnorm(MCAT.T, mean = 499.6, sd = 10.4, lower.tail = T)*100,
+                            pnorm(MCAT.T, mean = 25.2, sd = 6.4, lower.tail = T)*100),0),
+         # Create Factor Variables
+         Accepted.F = factor(Accepted, levels = c(0, 1),
+                             labels = c("No", "Yes")),
+         Sex.F = factor(Sex, levels = c(0, 1),
+                        labels = c("F", "M")),
+         Race.F = factor(Race, levels = c(0, 1, 2, 3, 4),
+                         labels = c("White", "Asian",
+                                    "Hispanic", "Black", "Other")),
+         Race.2 = ifelse(Race <= 1, 0, 1),
+         Race.F2 = factor(Race.2, levels = c(0, 1),
+                           labels = c("ORM", "URM")),
+         # Combine some variables
+         Accepted = Accepted + Accepted.Survey, #Update with survey info
+         Accepted = ifelse(Accepted >= 1, 1, 0), #Update with survey info
+         Answered.Survey = ifelse(is.na(Answered.Survey) == TRUE, 0, Answered.Survey),
+         # Interested in Med School?
+         Program.Choice = ifelse(is.na(MD.DDS)==T, 
+                                   Program.Choice, MD.DDS), 
+         Program.Choice = ifelse(is.na(Program.Choice)==T, 1, Program.Choice))
+
+#write.csv(dems, "Full_MSMP_432Project.csv") ## this is for Ben
+
+# Select only the Variables needed
+dems.subset <- dems %>% 
+  select(record.ID, Phys.GPA, NBME.Percentile, Ugrad.GPA, 
+         MCAT.Percentile, Accepted, Accepted.F, Year, Race, Race.F, Race.2, Race.F2, 
+         Sex, Sex.F, Program.Choice)
+```
+
+Create a few new variables, including a record ID. Use information from the exit survey to update the advisor sheets regarding acceptances and MCAT scores. Calculate MCAT percentiles from the orginal scores. Collapse the race variable into two categories, underrepresented minorities and not. Select only the students interested in medical school. 
+
+```{r Create the Full Case Subset}
+# Only the complete cases
+Leo <- dems %>% 
+  filter(Program.Choice == 1 & Year < 2015) %>%  # Select only the people interested in Med School
+  select(record.ID, Phys.GPA, NBME.Percentile, Ugrad.GPA, 
+         MCAT.Percentile, Accepted, Accepted.F, Year, Race.2, Race.F2, 
+         Sex, Sex.F) %>% 
+  na.omit() # Select for only the Complete Cases
+#write.csv(Leo, "dID_MSMPdata_Complete.csv")
+```
+
+```{r Create Set for Imputation}
+# Data from years 2011 - 2014 with missing data
+# Including the complete cases (Leo)
+
+Trish <- dems %>% 
+  filter(Program.Choice == 1 & Year < 2015) %>%
+  # Remove people with missing data from all Courses/NBME
+  filter(is.na(PHOL481 & PHOL482 & PHOL483 & PHOL484 & NBME.Percentile)!=TRUE) %>%
+  # Select Variables
+  select(record.ID, PHOL481, PHOL482, PHOL483, PHOL484,
+         Phys.GPA, NBME.Percentile, Ugrad.GPA, 
+         MCAT.Percentile, Accepted, Year, Race.2, Race.F2, Sex,
+         Sex.F)
+#write.csv(Trish, "dID_MSMPdata_Imputed.csv")
+```
+
+```{r Create Set for Predictions, include=FALSE}
+# Create a Tibble that can be imputed
+# Includes the Trish tibble and 2016 data 
+
+Predict.Impute <- dems %>% 
+  filter(Program.Choice == 1) %>%
+  # Set 2016 Acceptances to NA
+  mutate(Accepted.1 = ifelse(Year >= 2015, 
+                             "is.na<-"(Accepted, Accepted == 0), Accepted),
+         # Imputation Indicator Vars
+         PHOL482.i = ifelse(is.na(PHOL482) == TRUE, 1, 0),
+         PHOL484.i = ifelse(is.na(PHOL484) == TRUE, 1, 0),
+         Phys.GPA.i = ifelse(is.na(Phys.GPA) == TRUE, 1, 0),
+         NBME.Percentile.i = ifelse(is.na(NBME.Percentile) == TRUE, 1, 0),
+         Ugrad.GPA.i = ifelse(is.na(Ugrad.GPA) == TRUE, 1, 0),
+         MCAT.Percentile.i = ifelse(is.na(MCAT.Percentile) == TRUE, 1, 0),
+         Race.i = ifelse(is.na(Race) == TRUE, 1, 0),
+         Sex.i = ifelse(is.na(Sex) == TRUE, 1, 0),
+         Accepted.i = ifelse(is.na(Accepted) == TRUE, 1, 0)) %>% 
+  # Remove people with missing data from Fall Semester Courses
+  filter(is.na(PHOL481 & PHOL483)!=TRUE) %>% 
+  select(record.ID, PHOL481, PHOL482, PHOL483, PHOL484,
+         Phys.GPA, NBME.Percentile, Ugrad.GPA, 
+         MCAT.Percentile, Accepted.1, Year, Race.F, 
+         Sex.F, Program.Choice)
+```
+
+## Tidied Tibbles
+
+There were two tibbles used in this project:
+
+  + The complete case with `r nrow(Leo)` rows and `r ncol(Leo)` columns (variables)
+
+```{r Glimpse Complete}
+glimpse(Leo)
+```
+
+  + The imputed case with `r nrow(Trish)` rows and `r ncol(Trish)` columns (variables)
+
+```{r Glimpse Imputed}
+glimpse(Trish)
+```
+
+## Code Book
+
+```{r Code Book, echo=FALSE}
+codebook <- data_frame(
+    Variable = c("record.ID", "PHOL481", "PHOL482", "PHOL483", 
+                  "PHOL484", "Phys.GPA", "NBME.Percentile", 
+                  "Ugrad.GPA", "MCAT.Percentile", "Accepted", 
+                  "Year", "Race.F2", "Sex.F", "Program.Choice"),
+    Type = c("Record ID", "Quant", "Quant", "Quant", 
+             "Quant", "Quant", "Quant", "Quant", 
+             "Quant", "Binary Outcome", "Categorical", "Factor", 
+             "Factor", "Binary"),
+    Notes = c("Linking number for each student", "Med Phys 1 Semester Grade",
+              "Trans Phys 1 Semester Grade", "Med Phys 2 Semester Grade", 
+              "Trans Phys 2 Semester Grade", "Physiology GPA (100 point scale)",
+              "NBME Percentile (100 point scale)", 
+              "Undergraduate GPA (4.00 scale)", "MCAT Percentile (100 point scale)",
+              "Accepted to Medical School? (Yes/No)", 
+              "Year entering program", "Race (White or non-white)", 
+              "Sex (Male or Female)", "Program Choice (Indcator Var)")
+)
+
+pander(codebook, split.cells = c(10, 10, 53), caption = "Codebook")
+```
+
+## Table 1 Complete Cases
+
+```{r Table 1 Complete Cases}
+# Make a Table 1 for the Complete Cases
+vars <- c("Phys.GPA", "NBME.Percentile", 
+                  "Ugrad.GPA", "MCAT.Percentile",
+          "Race.F2", "Sex.F", "Accepted")
+fVars <- c("Race.F2", "Sex.F", "Accepted")
+CreateTableOne(vars = vars, factorVars = fVars, strata = "Year", data = Leo)
+```
+
+
+```{r Correlation Matrix Complete}
+# Make a Correlation Matrix with Complete Cases
+
+pairs(~ Accepted + Phys.GPA + Ugrad.GPA + NBME.Percentile + 
+         MCAT.Percentile + Race.F2 + Sex.F,
+  data = Leo,
+  main = "Correlation Matrix - Complete Cases",
+  upper.panel = panel.smooth,
+  diag.panel = panel.hist,
+  lower.panel = panel.cor)
+```
+
+## Table 1 Imputed Cases
+
+```{r Table 1 Imputed Cases}
+# Make a Table 1 for the Complete Cases
+vars <- c("Phys.GPA", "NBME.Percentile", 
+                  "Ugrad.GPA", "MCAT.Percentile", 
+          "Race.F2", "Sex.F", "Accepted")
+fVars <- c("Race.F2", "Sex.F", "Accepted")
+CreateTableOne(vars = vars, factorVars = fVars, strata = "Year", data = Trish)
+```
+
+The `NaN` occurs because demographic data was completely absent from 2011. 
+
+# Analyses{.tabset}
+
+Create a logistic regression model to predict the probability of at least one medical school acceptance based on the following variables:
+
+  + `Phys.GPA`: Student's overall Physiology Grades (100 pt scale) from core classes
+  + `NBME.Percentile`: Percentile score on the NBME Physiology Subject Exam
+  + `Ugrad.GPA`: Undergraduate GPA
+  + `MCAT.Percentile`: Percentile on the Medical College Admission Test
+  + `Race.F2`: Student's race - ORM (white/Asian), URM (Hispanic/African American/Other)
+  + `Sex.F`: Sex - Male or Female
+  
+## Complete: KS
+
+```{r Kitchen Sink Complete, warning=FALSE}
+# Use all the predictors
+dd <- datadist(Leo)
+options(datadist = "dd")
+
+lrm.model.1 <- lrm(Accepted ~ Phys.GPA + Ugrad.GPA + NBME.Percentile +
+         MCAT.Percentile + Race.F2 + Sex.F, data = Leo,
+         x = TRUE, y = TRUE)
+lrm.model.1
+```
+
+Include all of the variables. The C statistic is low, at 0.633. The $R^2$ is also very low, `r round(lrm.model.1$stats[10],3)`. Of note, only `Phys.GPA` and `NBME.Percentile` are significant. This is unexpected, as I thought the NBME was a useless exam in terms of medical school admissions (otherwise they would ask for it). I would have expected MCAT, Race, and undergraduate GPA to be important predictors.
+
+```{r, echo=T}
+# plot the anova values
+plot(anova(lrm.model.1))
+```
+
+Again, `NBME.Percentile` and `Phys.GPA` are important here.
+
+```{r}
+plot(summary(lrm.model.1))
+
+lrm.model.1.coef <- tidy(summary(lrm.model.1))
+
+# Extract Even Rows and Confidence Intervals
+lrm.model.1.tidy <- lrm.model.1.coef[c(FALSE, TRUE), 
+                                     c("Effect", "Lower.0.95", "Upper.0.95")]
+
+# set rownames
+invisible((setattr(lrm.model.1.tidy, "row.names", 
+                   c("Phys.GPA", "Ugrad.GPA", "NBME.Percentile", "MCAT.Percentile",
+                     "Race.R2", "Sex.F - F:M"))))
+
+pander(lrm.model.1.tidy, caption = "Odds Ratios: KS Complete Case")
+```
+
+Summary of the effects of each predictor, showing the effect on `Accepted` when moving from the 25th to the 75th percentile of each variable while holding the other variables at a prespecified level. As already seen in the ANOVA analysis,`Phys.GPA` and `NBME.Percentile` have the largest effect on `Accepted`. Increases in `Phys.GPA` doubles the likelihood of acceptance (OR: 2.003; 95% CI: 1.092, 3.676). Likewise, increases in `NBME.Percentile` decrease the likelihood of acceptance by about 66% (OR: 0.3409; 95% CI: 0.1372, 0.8471). `Ugrad.GPA`, `MCAT.Percentile`, `Race.R2`, and `Sex` all had effect sizes that crossed 1, reflecting what the ANOVA plot indicated in that `Phys.GPA` and `NBME.Percentile` are the most important terms in this model.
+
+### Calibration
+
+```{r, message=FALSE, echo=FALSE}
+plot(calibrate(lrm.model.1))
+```
+
+This calibration plot is quite terrible. This model underpredicts for probabilities under 0.6 and over predicts at probabilities above 0.7.
+
+```{r, eval=FALSE, include=FALSE}
+# requires ROCR and ggplot libraries
+prob <- predict(lrm.model.1, type="fitted")
+pred <- prediction(prob, Leo$Accepted)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+auc <- performance(pred, measure="auc")
+
+# the rest of this code is a little strange
+auc <- round(auc@y.values[[1]],3)
+roc.data <- data.frame(fpr=unlist(perf@x.values),
+                       tpr=unlist(perf@y.values),
+                       model="GLM")
+ggplot(roc.data, aes(x=fpr, ymin=0, ymax=tpr)) +
+    geom_ribbon(alpha=0.2) +
+    geom_line(aes(y=tpr)) +
+  geom_line(aes(y = fpr)) +
+    ggtitle(paste0("ROC Curve for Kitchen Sink Complete Case w/ AUC=", auc)) +
+  theme_bw()
+```
+
+
+### Nomogram
+
+```{r, fig.height=8, fig.width=11}
+plot(nomogram(lrm.model.1, fun=plogis, funlabel = "Probability of Acceptance"))
+```
+
+The nomogram highlights some important features. First, it is surprising how little of an impact undergraduate GPA has on the probability of acceptance; MCAT performance weighs more heavily, but is still not great at raising the probability of acceptance. Performance in the core physiology curriculum, however, does seem to have a large influence on the eventual probability. This was an expected finding, one which we thought we would see go hand-in-hand with undergraduate GPA and MCAT percentile. ‘Sex’ was right where we expected, having little overall effect, with females slightly favored. ‘Race’ was also a surprise: we expected race to have more weight in acceptance probability, much less the virtual 0 influence it has as predicted by this kitchen sink model. 
+
+Overall, we are surprised to see how much Medical Physiology performance influences probability of acceptance as compared to other factors, namely undergraduate GPA and MCAT percentile.
+
+### Plot Predictions: Kitchen Sink
+
+```{r, message=FALSE, fig.height=12, fig.width=7}
+plot.ks.gpa <- ggplot(Predict(lrm.model.1, Phys.GPA = 60:105, Race.F2, Sex.F, fun=plogis)) +
+  geom_point(aes(x = Phys.GPA, y = Accepted), data = Leo) +
+    theme_bw() +
+  labs(x = "Physiology Average",
+         y = "Pr(Acceptance)",
+         #title = "Model 1 - Kitchen Sink Predictions",
+         subtitle = "Across Race and Sex, holding all other predictors at their medians")
+
+plot.ks.nbme <- ggplot(Predict(lrm.model.1, NBME.Percentile = 0:100, Race.F2, Sex.F, fun=plogis)) +
+  geom_point(aes(x = NBME.Percentile, y = Accepted), data = Leo) +
+    theme_bw() +
+  labs(x = "NBME Percentile",
+         y = "Pr(Acceptance)",
+         title = "Model 1 - Kitchen Sink Predictions",
+         subtitle = "Across Race and Sex, holding all other predictors at their medians")
+
+plot.ks.mcat <- ggplot(Predict(lrm.model.1, MCAT.Percentile = 0:100, Race.F2, Sex.F, fun=plogis)) +
+  geom_point(aes(x = MCAT.Percentile, y = Accepted), data = Leo) +
+    theme_bw() +
+  labs(x = "MCAT Percentile",
+         y = "Pr(Acceptance)",
+         #title = "Model 1 - Kitchen Sink Predictions",
+         subtitle = "Across Race and Sex, holding all other predictors at their medians")
+
+grid.arrange(plot.ks.nbme, plot.ks.gpa, plot.ks.mcat, nrow = 3)
+```
+
+
+Holding Medical Physiology grade at a median value of 87.81, undergraduate GPA at 3.22, and MCAT percentile at 66.5, probability of acceptance declines with NBME performance. Again, this is unexpected. No significant differences between Sex or Race. 
+
+Holding undergraduate GPA at 3.22, NBME percentile at 47, and MCAT percentile at 66.5, probability of acceptance increases with Medical Physiology grade. Again, significant differences between Sex or Race.
+
+Holding Medical Physiology grade at 87.81, undergraduate GPA at 3.22, and NBME Percentile at 47, probability of acceptance increased with MCAT percentile, although our model has suggested that MCAT percentile was not significant.
+
+### Validate
+
+```{r, eval=T, include=T}
+set.seed(314); validate(lrm.model.1)
+```
+
+A negative $R^2$ is a mathematical impossibility. The optimism here is quite high in both the Dxy and R2.
+
+```{r, include=T}
+glm.model.1 <- glm(Accepted ~ Phys.GPA + Ugrad.GPA + NBME.Percentile +
+         MCAT.Percentile + Race.F2 + Sex.F, data = Leo, 
+         family="binomial"(link="logit"))
+par(mfrow=c(1,2))
+plot(glm.model.1, which  = c(4,5))
+```
+
+These plots did not help us identify any outliers. We only checked because some of the points in the prediction plots do not make sense. 
+## KS without NBME
+
+```{r Kitchen Sink Complete, eval=FALSE, include=FALSE, warning=FALSE}
+# Use all the predictors
+dd <- datadist(Leo)
+options(datadist = "dd")
+
+lrm.model.2 <- lrm(Accepted ~ Phys.GPA + Ugrad.GPA + 
+         MCAT.Percentile + Race.F2 + Sex.F, data = Leo,
+         x = TRUE, y = TRUE)
+lrm.model.2
+```
+
+## Complete: NL
+
+```{r}
+plot(spearman2(Accepted ~ Phys.GPA + Ugrad.GPA + NBME.Percentile +
+         MCAT.Percentile + Race.F2 + Sex.F, data = Leo))
+```
+
+Here, we plot a Spearman rho2 plot to see if maybe there are some non-linear terms we can add.
+Fit a cubic spline to the `Phys.GPA`. Include interaction terms between `Race` and `NBME.Percentile`. Orginally we wanted to include interaction terms between `Race` and `Phys.GPA`, however the lrm() fit yielded singular values. 
+
+```{r, include=T}
+dd <- datadist(Leo)
+options(datadist = "dd")
+
+lrm.model.nl <- lrm(Accepted ~ rcs(Phys.GPA, 5) + Ugrad.GPA + NBME.Percentile*Race.F2 +
+         MCAT.Percentile + Sex.F, data = Leo,
+         x = TRUE, y = TRUE)
+lrm.model.nl
+```
+
+This non-linear model has a Nagelkerke R2 of 0.143, far from 1. The C statistic is 0.692, an improvement (compared to 0.633), but still suggests poor predictive ability by this measure. The *Brier score* is 0.210, where 0 is optimal. This model is a slight improvement with the risk of overfitting.
+
+
+```{r}
+lrm.model.nl.coef <- tidy(summary(lrm.model.nl))
+
+# Extract Even Rows and Confidence Intervals
+lrm.model.nl.tidy <- lrm.model.nl.coef[c(FALSE, TRUE), 
+                                     c("Effect", "Lower.0.95", "Upper.0.95")]
+
+# set rownames
+invisible((setattr(lrm.model.nl.tidy, "row.names", 
+                   c("Phys.GPA", "Ugrad.GPA", "NBME.Percentile", "MCAT.Percentile",
+                     "Race.F2 - URM:ORM", "Sex.F - F:M"))))
+
+pander(lrm.model.nl.tidy, caption = "Odds Ratios: Non-linear Complete Case, NBME = 47, Race = ORM")
+```
+
+```{r, eval=F, include=F}
+# Odd's ratios
+confint.nl <- round(exp(confint.default(lrm.model.nl)),2) # 95% confidence intervals
+```
+
+Summary of the effects of each predictor, showing the effect on ‘Accepted’ when moving from the 25th to the 75th percentile of each variable while holding the other variables at a prespecified level. Increases in ‘Phys.GPA’ increases the likelihood of acceptance (OR: 3.325; 95% CI: 1.002, 11.03). ‘Ugrad.GPA’, ‘MCAT.Percentile’, ‘Race.R2’, and ‘Sex’ all had effect sizes that crossed 1.
+
+### Calibration
+
+```{r}
+plot(calibrate(lrm.model.nl))
+```
+
+
+The calibration plot for this non-linear model also under-predicts for probabilities under 0.6 and over-predicts at probabilities above 0.6. It, however, yields a mean absolute error of 0.054 (vs. 0.033 in the Kitchen Sink model) and a mean squared error of 0.00371 (vs. 0.00177 in the Kitchen Sink model).
+
+### ROC
+
+```{r, eval=FALSE, include=FALSE}
+# requires ROCR and ggplot libraries
+prob <- predict(lrm.model.nl, type="fitted")
+pred <- prediction(prob, Leo$Accepted)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+auc <- performance(pred, measure="auc")
+
+# the rest of this code is a little strange
+auc <- round(auc@y.values[[1]],3)
+roc.data <- data.frame(fpr=unlist(perf@x.values),
+                       tpr=unlist(perf@y.values),
+                       model="GLM")
+ggplot(roc.data, aes(x=fpr, ymin=0, ymax=tpr)) +
+    geom_ribbon(alpha=0.2) +
+    geom_line(aes(y=tpr)) +
+  geom_line(aes(y = fpr)) +
+    ggtitle(paste0("ROC Curve for Non-Linear Complete Case w/ AUC=", auc)) +
+  theme_bw()
+```
+
+### Nomogram
+
+```{r, fig.height=8, fig.width=7}
+plot(nomogram(lrm.model.nl, fun=plogis, funlabel = "Probability of Acceptance"))
+```
+
+While the model was slightly improved by adding a non-linear term and an interaction term, the nomogram tells an interesting story. Undergraduate GPA, MCAT percentile, and Sex remain in similar positions as in the Kitchen Sink model. Better performance in the core physiology courses increases probability of acceptance, to an extent; >90% performance becomes deleterious. `NBME.Percentile` has a much larger effect for underrepresented minorities, with the odd effect that a better NBME percentile worsens the probability of acceptance. This is the opposite effect we expected. 
+
+### Plot Predictions
+
+```{r, message=FALSE, fig.height=12, fig.width=7}
+plot.nl.nbme <- ggplot(Predict(lrm.model.nl, NBME.Percentile = 0:100, Race.F2, Sex.F, fun=plogis)) +
+  geom_point(aes(x = NBME.Percentile, y = Accepted), data = Leo) +
+    theme_bw() +
+  labs(x = "NBME Percentile",
+         y = "Pr(Acceptance)",
+         title = "Model 2 - Nonlinear Predictions",
+         subtitle = "Across Race and Sex, holding all other predictors at their medians")
+
+plot.nl.gpa <- ggplot(Predict(lrm.model.nl, Phys.GPA = 60:105, Race.F2, Sex.F, fun=plogis)) +
+  geom_point(aes(x = Phys.GPA, y = Accepted), data = Leo) +
+    theme_bw() +
+  labs(x = "Weighted Physiology Average",
+         y = "Pr(Acceptance)",
+         title = "Model 2 - Nonlinear Predictions",
+         subtitle = "Across Race and Sex, holding all other predictors at their medians")
+
+plot.nl.mcat <- ggplot(Predict(lrm.model.nl, MCAT.Percentile = 0:100, Race.F2, Sex.F, fun=plogis)) +
+  geom_point(aes(x = MCAT.Percentile, y = Accepted), data = Leo) +
+    theme_bw() +
+  labs(x = "MCAT Percentile",
+         y = "Pr(Acceptance)",
+         #title = "Model 1 - Kitchen Sink Predictions",
+         subtitle = "Across Race and Sex, holding all other predictors at their medians")
+
+grid.arrange(plot.nl.nbme, plot.nl.gpa, plot.nl.mcat, nrow = 3)
+```
+
+Holding Medical Physiology grades at 87.81, undergraduate GPA at 3.22, and MCAT percentile at 66.5, probability of acceptance again declines with NBME performance. Probability of acceptance declines more precipitously within the underrepresented minorities group. This could be because the lack of data we have for underrepresented students.  
+
+Holding undergraduate GPA at 3.22, NBME percentile at 47, and MCAT percentile at 66.5, the probability of acceptance increases with Medical Physiology grade, again, to an extent. This may have to do with some limitations of our data set, which we will address later. 
+
+
+```{r, include=T}
+glm.model.nl <- glm(Accepted ~ rcs(Phys.GPA, 5) + Ugrad.GPA + NBME.Percentile*Race.F2 +
+         MCAT.Percentile + Sex.F, data = Leo, 
+         family="binomial"(link="logit"))
+par(mfrow=c(1,2))
+plot(glm.model.nl, which  = c(4,5))
+```
+
+These plots did not help us identify any outliers. We only checked because some of the points in the prediction plots do not make sense.
+
+### Validate
+
+```{r, include=T}
+set.seed(314); validate(lrm.model.nl)
+```
+
+## Imputation
+
+```{r Margin Plot}
+# Check patterns in missingness 
+marginplot(Trish[, c("MCAT.Percentile", "Ugrad.GPA")])
+```
+
+We are missing 30 counts of Undergraduate GPA and 85 counts of MCAT Percentiles. There are 19 students with both missing. Undergrad GPA is probably missing at random. MCAT Percentile is probably not. 
+
+```{r Missing Pattern, include=T}
+aggr(Trish, 
+     numbers = TRUE, sortVARS = TRUE,
+     labels = names(Trish), cex.axis = 0.5,
+     gap = 3, ylab = c("Missing Data", "Pattern"))
+
+# MCAT Percentile is missing > 30% of data
+# Ugrad gpa/Sex is only missing in arond 10%
+# Missing grades for the 2016 cohort
+# Missing Acceptances for 2016 cohort
+```
+
+`Ugrad.GPA`, `MCAT.Percentile`, `Race.F`, `Sex.F` are all missing at least 10% of the data. `MCAT.Percentile` is missing about 30%. 
+
+```{r Set Predictor Matrix}
+# Non Missing Outcomes
+# Initialize Imputation Stuff
+imp.t <- mice(Trish, max=0, print=FALSE)
+
+# Predictor Matrix
+pred <- imp.t$predictorMatrix
+
+# record ID & Program Choice aren't used as predictors
+pred[, c("record.ID", "Sex")] <- 0 
+
+# Run with 50 frames and 10 iterations
+imp.t <- mice(Trish, pred = pred,
+            m = 4, maxit = 10, seed = 271828, print = F)
+
+# Combine all of the imputation frames in a long dataset
+imp.t.complete <- mice::complete(imp.t, 'long')
+imp.single.3 <- as.data.frame(mice::complete(imp.t, 3)) # save frame 3 as a dataframe
+```
+
+```{r Density Plots}
+# Non missing Outcomes
+# Density plots for Imputed Values
+densityplot(imp.t)
+```
+
+The density histograms were plotted for each imputed frame (pink) against the observed values (blue). While the ugrad GPA has a similar distribtuion to the observed values, the MCAT percentiles were more symmetric than was observed in the exisiting data. The imputed frames give more weight to the lower end of the percentile range. This is annoying.
+
+### Pooled Analyses
+```{r}
+# Non Linear
+dd <- datadist(imp.single.3)
+options(datadist = "dd")
+
+lrm.model.nl.imp <- with(imp.t, lrm(Accepted ~ rcs(Phys.GPA, 5) + Ugrad.GPA + NBME.Percentile*Race.F2 +
+         MCAT.Percentile + Sex.F, data = Leo,
+         x = TRUE, y = TRUE))
+nl.imp.t.pool <- pool(lrm.model.nl.imp)
+nl.imp.t.results <- summary(pool(lrm.model.nl.imp))
+pander(round(nl.imp.t.results, 2), caption = "Non-Exponentiated Imputed Pooled Results")
+```
+
+```{r, include=T}
+# Exponentiate the Pooled results to get odds ratios
+pander(round(exp(nl.imp.t.results[, c("est", "lo 95", "hi 95")]), 2), 
+       caption = "Odds Ratios: Non-Linear, Multiply Imputed Predictors")
+```
+
+Nothing is significant here. Note the extremely high Upper 95% CI. The pooling did not work well here.  
+
+```{r, fig.height=10, fig.width=10}
+par(mfrow = c(2,2))
+invisible(with(imp.t, plot(calibrate(lrm.model.nl, fun=plogis, funlabel = "Probability of Acceptance"))))
+par(mfrow = c(1,1))
+```
+
+Calibration plots look really similar to the non-linear complete case. 
+
+```{r, eval=F, include=F}
+dd <- datadist(imp.single.3)
+options(datadist = "dd")
+
+ks.imp.t <- with(imp.t, lrm(Accepted ~ Phys.GPA + Ugrad.GPA + NBME.Percentile +
+         MCAT.Percentile + Race.F2 + Sex.F, data = Leo,
+         x = TRUE, y = TRUE))
+
+ks.imp.t.results <- summary(pool(ks.imp.t))
+pander(round(ks.imp.t.results,2), caption = "Non-Exponentiated Imputed Pooled Results")
+```
+
+
+## Validate Using an Imputed Frame
+
+```{r}
+# Kitchen sink using new data
+e <- datadist(imp.single.3)
+options(datadist = "e")
+
+#ks.imp.3 <- lrm(Accepted ~ Phys.GPA + Ugrad.GPA + NBME.Percentile +
+         #MCAT.Percentile + Race.2 + Sex, data = imp.single.3,
+         #x = TRUE, y = TRUE)
+pred.ks.imp.3 <- predict(lrm.model.1, newdata = data.frame(imp.single.3), type = "fitted")
+pred.nl.imp.3 <- predict(lrm.model.nl, newdata = data.frame(imp.single.3), type = "fitted")
+```
+
+```{r}
+# Compare Models 1 and 2 based on Prediction Error Summaries
+errors_ks <- imp.single.3$Accepted - pred.ks.imp.3
+errors_nl <- imp.single.3$Accepted - pred.nl.imp.3
+
+mape_ks <- mean(abs(errors_ks))
+mape_nl <- mean(abs(errors_nl))
+
+mspe_ks <- mean(errors_ks^2)
+mspe_nl <- mean(errors_nl^2)
+
+cor_ks <- cor(imp.single.3$Accepted, pred.ks.imp.3)
+cor_nl <- cor(imp.single.3$Accepted, pred.nl.imp.3)
+
+Cstat_ks <- rcorr.cens(pred.ks.imp.3, imp.single.3$Accepted)[1]
+Cstat_nl <- rcorr.cens(pred.nl.imp.3, imp.single.3$Accepted)[1]
+
+validation.table <- data_frame(
+  Model = c("KS Complete", "NL Complete"),
+  MAPE = round(c(mape_ks, mape_nl),3),
+  MSPE = round(c(mspe_ks, mspe_nl),3),
+  'Corr with Admit' = round(c(cor_ks, cor_nl),3),
+  'Est. C' = round(c(Cstat_ks, Cstat_nl),3))
+
+pander(validation.table, 
+       caption = "Validating on an Imputed Frame")
+
+```
+
+
+# Comparison: Complete Cases
+
+```{r, echo=FALSE, message=FALSE}
+results.table <- data_frame(
+  Model = c("KS Complete", "NL Complete"),
+  Dxy = round(c(lrm.model.1$stats["Dxy"], lrm.model.nl$stats["Dxy"]),3),
+  C = round(c(lrm.model.1$stats["C"], lrm.model.nl$stats["C"]),3),
+  R2 = round(c(lrm.model.1$stats["R2"], lrm.model.nl$stats["R2"]),3),
+  Brier = round(c(lrm.model.1$stats["Brier"], lrm.model.nl$stats["Brier"]),3),
+  AIC = round(c(glance(lrm.model.1)[1,"AIC"], glance(lrm.model.nl)[1,"AIC"]),0),
+  BIC = round(c(glance(lrm.model.1)[1,"BIC"], glance(lrm.model.nl)[1,"BIC"]),0)
+  )
+
+pander(results.table, 
+       caption = "Logistic Model Comparisons")
+```
+
+The R2 for both the Kitchen Sink and Nonlinear models are pretty poor, although the nonlinear model’s R2 is slightly better. The AIC may as well be identical for the two models, while the Kitchen Sink has a better BIC. Using the table alone, the nonlinear is a more attractive option. However, we do have some concerns with the nonlinear model, referenced above, that steers us towards the kitchen sink model instead.
+
+# Conclusions
+
+  + While higher MCAT Percentiles were associated with increased probabilities of acceptance, the effect size was not as large as we expected. In our dataset, MCAT was not significant. This is likely reflective of the fact that we only had one MCAT score per student; it is likely that students scoring below the 70th percentile retook the exam before ultimately gaining acceptance to medical school.s
+  
+  + The average scores in the core physiology courses were predictive of acceptance. Via the kitchen sink model, students with better performance were more likely to gain acceptance. The non-linear model also predicted this up to around an average of 90%, where the likelihood of acceptance plummets. 
+  
+Given the findings of our models, there are some real issues with this dataset:
+
+  + For students not gaining admission to school, there was no indication as to whether or not they applied.
+  + Only the first MCAT score that the student applied with to the graduate program was available. We have no way of knowing if he/she retook the exam unless they answered the exit survey. 
+  + Interview performance is also a very important factor in admissions, and this was completely left out of this analysis. 
+    
+2. We learned:
+
+  + Minimize free form boxes on surveys. People think differently and like to provide a mixture of text and numbers. People also spell their names differently from time to time.
+  + We really like the `full_join` function. Also this ` %>% ` is very convenient for tidying tibbles.
+  + Model validation with multiple imputations is non-trivial.
+
+  Opportunities for Further Investigation:
+  
+  + Get a better dataset
+
+```{r, eval=T}
+# Obtain R version/Platform/OS
+sessionInfo()
+```
+
